@@ -9,12 +9,11 @@ DB_CONFIG = {
     "database": "flipkart_minutes_final"
 }
 
-LINK_LIMIT = 20
+LINK_LIMIT = 50
 
 
 def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
-
 
 def create_tables():
     conn = get_db_connection()
@@ -22,7 +21,7 @@ def create_tables():
 
     # Existing table
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS product_data (
+    CREATE TABLE IF NOT EXISTS pdp_data (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         locality VARCHAR(100),
         sku varchar(100) NOT NULL,
@@ -50,6 +49,7 @@ def create_tables():
         locality VARCHAR(200),
         location VARCHAR(200),
         is_deliverable BOOLEAN DEFAULT TRUE,
+        status VARCHAR(20) DEFAULT 'pending',
         checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_pincode (pincode)
     );
@@ -127,23 +127,34 @@ def get_deliverable_pincodes(limit: int = LINK_LIMIT) -> List[Dict]:
     cursor = conn.cursor(dictionary=True)
 
     cursor.execute("""
-        SELECT pincode, latitude, longitude, city 
-        FROM final_pincode_deliverable 
-        WHERE is_deliverable = TRUE
+        SELECT *
+        FROM master_product_pincode 
+        WHERE status = 'pending'
         LIMIT %s
     """, (limit,))
 
     rows = cursor.fetchall()
+
+    if rows:
+        ids = [row['id'] for row in rows]
+        placeholders = ','.join(['%s'] * len(ids))
+        cursor.execute(f"""
+            UPDATE master_product_pincode
+            SET status = 'processing'
+            WHERE id IN ({placeholders})
+        """, ids)
+        conn.commit()
+
     cursor.close()
     conn.close()
     return rows
 
 
-def update_status(record_id: int, status: str = "done"):
+def update_status(table,record_id: int, status: str = "done"):
     conn = get_db_connection()
     cursor = conn.cursor()
-    cursor.execute("""
-        UPDATE pincodes 
+    cursor.execute(f"""
+        UPDATE {table} 
         SET status = %s 
         WHERE id = %s
     """, (status, record_id))
@@ -158,16 +169,17 @@ def insert_product_data(product_dict: Dict):
 
     try:
         query = """
-        INSERT INTO product_data 
-        (sku, url, pincode, city, product_name, brand, 
+        INSERT INTO pdp_data 
+        (sku, url, pincode, locality, city, product_name, brand, 
          stock_availability_status, EAN_code, product_data)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         cursor.execute(query, (
             product_dict.get('sku'),
             product_dict.get('url'),
             product_dict.get('pincode'),
+            product_dict.get('locality'),
             product_dict.get('city'),
             product_dict.get('product_name'),
             product_dict.get('brand'),
