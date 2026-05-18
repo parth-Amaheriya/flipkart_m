@@ -1,11 +1,12 @@
+import json
 import mysql.connector
-from typing import Dict
+from typing import Dict, List
 
 DB_CONFIG = {
     "host": "localhost",
     "user": "root",
     "password": "actowiz",
-    "database": "FLIPKART_MINUTES_DB"
+    "database": "flipkart_minutes_final"
 }
 
 LINK_LIMIT = 20
@@ -15,13 +16,15 @@ def get_db_connection():
     return mysql.connector.connect(**DB_CONFIG)
 
 
-def create_table():
+def create_tables():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    create_table_query = """
+    # Existing table
+    cursor.execute("""
     CREATE TABLE IF NOT EXISTS product_data (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        locality VARCHAR(100),
         sku varchar(100) NOT NULL,
         url VARCHAR(500) NOT NULL,
         pincode VARCHAR(10) NOT NULL,
@@ -30,30 +33,50 @@ def create_table():
         brand VARCHAR(200),
         stock_availability_status VARCHAR(10) DEFAULT 'NO',
         EAN_code VARCHAR(50),
-        quantity VARCHAR(50),
+        product_data JSON,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        
         UNIQUE KEY unique_sku_pincode (sku, pincode)
     );
-    """
+    """)
 
-    cursor.execute(create_table_query)
+    # NEW TABLE: Deliverable Pincodes
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS final_pincode_deliverable (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        pincode VARCHAR(10) NOT NULL UNIQUE,
+        latitude DECIMAL(10, 6),
+        longitude DECIMAL(10, 6),
+        city VARCHAR(100),
+        locality VARCHAR(200),
+        location VARCHAR(200),
+        is_deliverable BOOLEAN DEFAULT TRUE,
+        checked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_pincode (pincode)
+    );
+    """)
+
     conn.commit()
     cursor.close()
     conn.close()
-    print("✅ Table 'product_data' verified/created successfully.")
+    print("✅ Tables verified/created successfully.")
 
 
-def get_pending_urls_pincodes(limit: int = LINK_LIMIT):
+def get_unique_pending_pincodes(limit: int = LINK_LIMIT) -> List[Dict]:
+    """Fetch pending pincodes with their row ids for status updates"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     cursor.execute("""
-        SELECT id, url, pincode 
-        FROM product_urls_pincodes
+    SELECT id, pincode, location
+    FROM pincodes
+    WHERE id IN (
+        SELECT MIN(id)
+        FROM pincodes
         WHERE status = 'pending'
-        LIMIT %s
+        GROUP BY pincode
+    )
+    ORDER BY id
+    LIMIT %s
     """, (limit,))
 
     rows = cursor.fetchall()
@@ -62,8 +85,8 @@ def get_pending_urls_pincodes(limit: int = LINK_LIMIT):
         ids = [row['id'] for row in rows]
         placeholders = ','.join(['%s'] * len(ids))
         cursor.execute(f"""
-            UPDATE product_urls_pincodes 
-            SET status = 'processing' 
+            UPDATE pincodes
+            SET status = 'processing'
             WHERE id IN ({placeholders})
         """, ids)
         conn.commit()
@@ -73,12 +96,54 @@ def get_pending_urls_pincodes(limit: int = LINK_LIMIT):
     return rows
 
 
+def insert_deliverable_pincode(pincode: str, lat: float, lng: float, city: str, locality: str, location: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            INSERT INTO final_pincode_deliverable
+            (pincode, latitude, longitude, city, locality, location, is_deliverable)
+            VALUES (%s, %s, %s, %s, %s, %s, TRUE)
+            ON DUPLICATE KEY UPDATE 
+                latitude = VALUES(latitude),
+                longitude = VALUES(longitude),
+                city = VALUES(city),
+                locality = VALUES(locality),
+                location = VALUES(location),
+                checked_at = CURRENT_TIMESTAMP
+        """, (pincode, lat, lng, city, locality, location))
+        conn.commit()
+    except Exception as e:
+        print(f"❌ Error inserting deliverable pincode {pincode}: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def get_deliverable_pincodes(limit: int = LINK_LIMIT) -> List[Dict]:
+    """Get deliverable pincodes for product scraping"""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    cursor.execute("""
+        SELECT pincode, latitude, longitude, city 
+        FROM final_pincode_deliverable 
+        WHERE is_deliverable = TRUE
+        LIMIT %s
+    """, (limit,))
+
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return rows
+
+
 def update_status(record_id: int, status: str = "done"):
-    """status can be: done, failed, not_serviceable"""
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
-        UPDATE product_urls_pincodes 
+        UPDATE pincodes 
         SET status = %s 
         WHERE id = %s
     """, (status, record_id))
@@ -95,16 +160,8 @@ def insert_product_data(product_dict: Dict):
         query = """
         INSERT INTO product_data 
         (sku, url, pincode, city, product_name, brand, 
-         stock_availability_status, EAN_code, quantity)
+         stock_availability_status, EAN_code, product_data)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE 
-            city = VALUES(city),
-            product_name = VALUES(product_name),
-            brand = VALUES(brand),
-            stock_availability_status = VALUES(stock_availability_status),
-            EAN_code = VALUES(EAN_code),
-            quantity = VALUES(quantity),
-            updated_at = CURRENT_TIMESTAMP
         """
 
         cursor.execute(query, (
@@ -116,7 +173,7 @@ def insert_product_data(product_dict: Dict):
             product_dict.get('brand'),
             product_dict.get('stock_avaliblity_status'),
             product_dict.get('EAN_code'),
-            product_dict.get('quantity')
+            json.dumps(product_dict.get('product_data'))
         ))
         conn.commit()
 

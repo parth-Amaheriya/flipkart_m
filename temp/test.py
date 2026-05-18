@@ -93,7 +93,7 @@ def request_1(locationcontext={'pincode': '230001'}, marketplacecontext={'market
     print(response)
 
     content_type = response.headers.get('content-type', '').lower()
-    response_folder = 'pagesaves'
+    response_folder = 'pagesaves2'
     os.makedirs(response_folder, exist_ok=True)
 
     if response.status_code == 200:

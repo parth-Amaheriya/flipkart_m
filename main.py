@@ -7,19 +7,24 @@ from typing import Dict
 from curl_cffi import requests
 
 import db as db_handler
+from parser import parse_json_file
+
 # ======================= CONFIG =======================
 MAX_WORKERS = 8
 
 # Page Save Folders
 PAGESAVE_DIR = "pagesaves"
 GEOCODE_DIR = os.path.join(PAGESAVE_DIR, "geocode_results")
-RESPONSE1_DIR = os.path.join(PAGESAVE_DIR, "responce_1")
-RESPONSE2_DIR = os.path.join(PAGESAVE_DIR, "responce_2")
+RESPONSE1_DIR = os.path.join(PAGESAVE_DIR, "serviceability")
+RESPONSE2_DIR = os.path.join(PAGESAVE_DIR, "product_details")
+RESPONSE3_DIR = os.path.join(PAGESAVE_DIR, "parsed_products")
 
 os.makedirs(GEOCODE_DIR, exist_ok=True)
 os.makedirs(RESPONSE1_DIR, exist_ok=True)
 os.makedirs(RESPONSE2_DIR, exist_ok=True)
+os.makedirs(RESPONSE3_DIR, exist_ok=True)
 
+# ======================= HEADERS (same as before) =======================
 HEADERS = {
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
@@ -62,11 +67,13 @@ def get_lat_long_from_pincode(pincode: str):
 
         result = data["results"][0]
         loc = result["geometry"]["location"]
+        locality=result.get("formatted_address")
         return {
             "latitude": loc["lat"],
             "longitude": loc["lng"],
             "city": next((comp["long_name"] for comp in result.get("address_components", [])
-                         if "locality" in comp.get("types", [])), None)
+                         if "locality" in comp.get("types", [])), None),
+            "locality": locality
         }
     except Exception as e:
         print(f"Geocode Error for {pincode}: {e}")
@@ -104,55 +111,87 @@ def fetch_product_details(pageuri: str, pincode: str):
         schema = data.get('RESPONSE', {}).get('pageData', {}).get('seoData', {}).get('schema', [{}])[0]
 
         save_json(data, RESPONSE2_DIR, f"product_{pincode}_{schema.get('sku')}.json")
+        
+        parse_data=parse_json_file(data)
 
+        with open(os.path.join(RESPONSE3_DIR, f"parsed_product_{pincode}_{schema.get('sku')}.json"), 'w', encoding='utf-8') as f:
+            json.dump(parse_data, f, indent=2, ensure_ascii=False)
 
+        context=data.get('RESPONSE', {}).get('pageData', {}).get('pageContext', {})
+        if context.get('fdpEventTracking', {}).get('events', {}).get('psi', {}).get('pls', {}).get('availabilityStatus') == 'IN_STOCK':
+            stock_status = "YES"
+        else:            
+            stock_status = "NO"    
         return {
             "sku": schema.get('sku'),
             "product_name": schema.get('name'),
             "brand": schema.get('brand', {}).get('name'),
-            "stock_avaliblity_status": schema.get('offers', {}).get('availability') == 'http://schema.org/InStock'
+            "stock_avaliblity_status": stock_status,
+            "product_data": parse_data
         }
     except Exception as e:
         print(f"Product Fetch Error: {e}")
         return {}
 
 
-# ======================= MAIN WORKER =======================
+
+# ======================= NEW: DELIVERABLE PINCODE CHECK =======================
+def process_pincode_for_deliverability(record: Dict):
+    record_id = record['id']
+    pincode = record['pincode']
+    location = record.get('location')
+
+    print(f"Checking deliverability for pincode: {pincode}")
+
+    geo = get_lat_long_from_pincode(pincode)
+    if not geo:
+        print(f"Geocoding failed for {pincode}")
+        db_handler.update_status(record_id, "failed")
+        return
+
+    is_serviceable = check_serviceability(geo['latitude'], geo['longitude'], pincode)
+
+    if is_serviceable:
+        print(f"✅ Deliverable: {pincode} | City: {geo.get('city')}")
+        db_handler.insert_deliverable_pincode(
+            pincode, 
+            geo['latitude'], 
+            geo['longitude'], 
+            geo.get('city'),
+            geo.get('locality'),
+            location
+        )
+        db_handler.update_status(record_id, "done")
+    else:
+        print(f"❌ Not Deliverable: {pincode}")
+        db_handler.update_status(record_id, "not_serviceable")
+
+
+# ======================= MAIN WORKER (Product Scraping) =======================
 def process_record(record: Dict):
     record_id = record['id']
     url = record['url']
     pincode = record['pincode']
-    if "http" in url :
-        url= url.split("flipkart.com")[-1]
+
+    if "http" in url:
+        url = url.split("flipkart.com")[-1]
+
     try:
-        print(f" Processing → {url} |  {pincode}")
+        print(f"Processing → {url} | Pin: {pincode}")
 
-        geo = get_lat_long_from_pincode(pincode)
-        if not geo:
-            db_handler.update_status(record_id, "failed")
-            return
-
-        is_serviceable = check_serviceability(geo['latitude'], geo['longitude'], pincode)
-
-        if not is_serviceable:
-            print(f" Not Serviceable → {pincode}")
-            db_handler.update_status(record_id, "not_serviceable")
-            return  
-
-        # Only proceed if serviceable
-        print(f" Serviceable → Fetching product details for {pincode}")
+        # Fetch from deliverable table instead of re-checking
         prod_data = fetch_product_details(url, pincode)
 
         result = {
             "sku": prod_data.get('sku'),
             "url": url,
             "pincode": pincode,
-            "city": geo.get('city'),
+            "city": record.get('city'),          # from deliverable table
             "product_name": prod_data.get('product_name'),
             "brand": prod_data.get('brand'),
-            "stock_avaliblity_status": prod_data.get('stock_avaliblity_status', False),
+            "stock_avaliblity_status": prod_data.get('stock_avaliblity_status'),
             "EAN_code": None,
-            "quantity": None
+            "product_data": prod_data.get('product_data')
         }
 
         db_handler.insert_product_data(result)
@@ -166,16 +205,31 @@ def process_record(record: Dict):
 
 # ======================= MAIN =======================
 def main():
-    db_handler.create_table()
-    print("Flipkart Scraper Started (Not Serviceable = Skip DB Insert)\n")
+    db_handler.create_tables()
 
+    print("=== Step 1: Checking Pincode Deliverability ===\n")
     while True:
-        pending = db_handler.get_pending_urls_pincodes()
-        if not pending:
-            print(" No more pending records. Finished!")
+        unique_pincode_rows = db_handler.get_unique_pending_pincodes()
+
+        if not unique_pincode_rows:
+            print("No new pincodes to check.")
             break
 
-        print(f" Processing {len(pending)} records with {MAX_WORKERS} threads...\n")
+        print(f"Found {len(unique_pincode_rows)} unique pincodes to check.\n")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = [executor.submit(process_pincode_for_deliverability, record) for record in unique_pincode_rows]
+            for future in as_completed(futures):
+                future.result()
+
+    print("\n=== Step 2: Starting Product Scraping (Only Deliverable Pincodes) ===\n")
+
+    while True:
+        pending = db_handler.get_deliverable_pincodes()   # You may want to modify this too
+        if not pending:
+            print("No more pending records. Finished!")
+            break
+
+        print(f"Processing {len(pending)} records with {MAX_WORKERS} threads...\n")
 
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [executor.submit(process_record, rec) for rec in pending]
