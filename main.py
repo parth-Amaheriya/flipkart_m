@@ -6,23 +6,21 @@ from typing import Dict
 from urllib.parse import urlparse, parse_qs
 from curl_cffi import requests
 
+from utils import (
+    GEOCODE_DIR,
+    RESPONSE1_DIR,
+    RESPONSE2_DIR,
+    RESPONSE3_DIR,
+    save_json
+)
+
 import db as db_handler
 from parser import parse_json_file
 
+from call_html import fetch_product_details
+
 # ======================= CONFIG =======================
 MAX_WORKERS = 10
-
-# Page Save Folders
-PAGESAVE_DIR = "pagesaves3"
-GEOCODE_DIR = os.path.join(PAGESAVE_DIR, "geocode_results")
-RESPONSE1_DIR = os.path.join(PAGESAVE_DIR, "serviceability")
-RESPONSE2_DIR = os.path.join(PAGESAVE_DIR, "product_details")
-RESPONSE3_DIR = os.path.join(PAGESAVE_DIR, "parsed_products")
-
-os.makedirs(GEOCODE_DIR, exist_ok=True)
-os.makedirs(RESPONSE1_DIR, exist_ok=True)
-os.makedirs(RESPONSE2_DIR, exist_ok=True)
-os.makedirs(RESPONSE3_DIR, exist_ok=True)
 
 # ======================= HEADERS (same as before) =======================
 HEADERS = {
@@ -48,12 +46,6 @@ HEADERS = {
 
 # ======================= HELPER FUNCTIONS =======================
 import gzip
-
-def save_json(data, folder: str, filename: str):
-    os.makedirs(folder, exist_ok=True)
-    filepath = os.path.join(folder, filename + ".gz")
-    with gzip.open(filepath, 'wt', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
 
 
 def get_lat_long_from_pincode(pincode: str):
@@ -121,156 +113,6 @@ def check_serviceability(latitude, longitude, pincode: str) -> bool:
         )
 
 
-# def fetch_product_details(pageuri: str, pincode: str):
-#     data = None
-#     error_message = None
-
-#     try:
-#         url = 'https://1.rome.api.flipkart.com/api/4/page/fetch'
-#         payload = {
-#             'pageUri': pageuri,
-#             'pageContext': {
-#                 'trackingContext': {'context': {'eVar51': 'direct_browse', 'eVar61': 'direct_browse'}},
-#                 'networkSpeed': 9350
-#             },
-#             'locationContext': {'pincode': pincode, 'changed': False},
-#         }
-
-#         resp = requests.post(url, params={'cacheFirst': 'false'}, headers=HEADERS, json=payload, impersonate='chrome')
-#         data = resp.json()
-#         schema = data.get('RESPONSE', {}).get('pageData', {}).get('seoData', {}).get('schema', [{}])[0]
-        
-#         parse_data=parse_json_file(data)
-
-#         # with open(os.path.join(RESPONSE3_DIR, f"parsed_product_{pincode}_{schema.get('sku')}.json"), 'w', encoding='utf-8') as f:
-#         #     json.dump(parse_data, f, indent=2, ensure_ascii=False)
-
-#         context=data.get('RESPONSE', {}).get('pageData', {}).get('pageContext', {})
-#         if context.get('fdpEventTracking', {}).get('events', {}).get('psi', {}).get('pls', {}).get('availabilityStatus') == 'IN_STOCK':
-#             stock_status = "YES"
-#         else:            
-#             stock_status = "NO"    
-#         return {
-#             "sku": schema.get('sku'),
-#             "product_name": schema.get('name'),
-#             "brand": schema.get('brand', {}).get('name'),
-#             "stock_avaliblity_status": stock_status,
-#             "product_data": parse_data
-#         }
-#     except Exception as e:
-#         error_message = str(e)
-#         print(f"Product Fetch Error: {e}")
-#         return {}
-#     finally:
-#         schema = {}
-#         if data:
-#             schema = data.get('RESPONSE', {}).get('pageData', {}).get('seoData', {}).get('schema', [{}])[0] or {}
-        
-#         query_params = parse_qs(urlparse(url).query)
-#         pid = query_params.get("pid", [None])[0]
-#         print("*"*20)
-#         print(pid)
-#         print("*"*20)
-#         save_json(
-#             data if data is not None else {
-#                 "pageUri": pageuri,
-#                 "pincode": pincode,
-#                 "error": error_message,
-#                 "source": "product_details"
-#             },
-#             RESPONSE2_DIR,
-#             f"product_{pincode}_{pid}.json"
-#         )
-
-def fetch_product_details(pageuri: str, pincode: str):
-    data = None
-    error_message = None
-
-    try:
-        url = 'https://1.rome.api.flipkart.com/api/4/page/fetch'
-        payload = {
-            'pageUri': pageuri,
-            'pageContext': {
-                'trackingContext': {'context': {'eVar51': 'direct_browse', 'eVar61': 'direct_browse'}},
-                'networkSpeed': 9350
-            },
-            'locationContext': {'pincode': pincode, 'changed': False},
-        }
-
-        resp = requests.post(url, params={'cacheFirst': 'false'}, headers=HEADERS, json=payload, impersonate='chrome')
-        data = resp.json()
-
-        # === Safe schema extraction ===
-        schema_list = data.get('RESPONSE', {}) \
-                         .get('pageData', {}) \
-                         .get('seoData', {}) \
-                         .get('schema', [])
-        if len(schema_list) > 0:
-            schema = schema_list[0]
-        else:
-            return {
-                'error':"No_FOUND"
-            }
-            
-
-        parse_data = parse_json_file(data)
-
-        context = data.get('RESPONSE', {}).get('pageData', {}).get('pageContext', {})
-        pls = context.get('fdpEventTracking', {}) \
-                             .get('events', {}) \
-                             .get('psi', {}) \
-                             .get('pls', {})
-        
-        if pls.get("unserviceabilityReason"):
-            availability = "OUT_OF_STOCK"
-        else:
-            availability = pls.get('availabilityStatus')
-
-        stock_status = "YES" if availability == 'IN_STOCK' else "NO"
-
-        return {
-            "sku": schema.get('sku'),
-            "product_name": schema.get('name'),
-            "brand": schema.get('brand', {}).get('name'),
-            "stock_avaliblity_status": stock_status,
-            "product_data": parse_data
-        }
-
-    except Exception as e:
-        error_message = str(e)
-        print(f"Product Fetch Error for pin {pincode}: {e}")
-        return {}
-    
-    finally:
-        # === Safe save in finally ===
-        try:
-            schema_list = (data or {}).get('RESPONSE', {}) \
-                                    .get('pageData', {}) \
-                                    .get('seoData', {}) \
-                                    .get('schema', [])
-            schema = schema_list[0] if schema_list else {}
-
-            # Better PID extraction
-            pid = None
-            if pageuri and '?' in pageuri:
-                query = pageuri.split('?', 1)[1]
-                params = parse_qs(query)
-                pid = params.get('pid', [None])[0]
-            save_json(
-                data if data is not None else {
-                    "pageUri": pageuri,
-                    "pincode": pincode,
-                    "error": error_message,
-                    "source": "product_details"
-                },
-                RESPONSE2_DIR,
-                f"product_{pincode}_{pid or 'unknown'}.json"
-            )
-        except Exception as save_err:
-            print(f"Failed to save response for pin {pincode}: {save_err}")
-
-# https://www.flipkart.com/bhujialalji-navratna-mix-namkeen-fresh-healthy-snack-mixture/p/itmf820e69f479c9?pid=SNSGZDUSB49KYJPF&lid=LSTSNSGZDUSB49KYJPFDZGSPA&marketplace=HYPERLOCAL&cmpid=content_snack-savourie_8965229628_gmc
-
 # ======================= NEW: DELIVERABLE PINCODE CHECK =======================
 def process_pincode_for_deliverability(record: Dict):
     record_id = record['id']
@@ -318,7 +160,9 @@ def process_record(record: Dict):
         # Fetch from deliverable table instead of re-checking
         prod_data = fetch_product_details(url, pincode)
         if prod_data.get('error'):
+            print("%"* 50)
             print(f"Error fetching product details for {url}: {prod_data['error']}")
+            print("%"* 50)
             db_handler.update_status("master_product_pincode", record_id, prod_data['error'])
             return
         
@@ -330,9 +174,10 @@ def process_record(record: Dict):
             "city": record.get('city'),          # from deliverable table
             "product_name": prod_data.get('product_name'),
             "brand": prod_data.get('brand'),
-            "stock_avaliblity_status": prod_data.get('stock_avaliblity_status'),
+            "stock_availability_status": prod_data.get('stock_availability_status'),
             "EAN_code": record.get('ean_code'),  # from products_urls table
-            "product_data": prod_data.get('product_data')
+            "product_data": prod_data.get('product_data'),
+            "pls":prod_data.get("pls")
         }
 
         db_handler.insert_product_data(result)

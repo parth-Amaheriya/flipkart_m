@@ -32,6 +32,7 @@ def create_tables():
         brand VARCHAR(200),
         stock_availability_status VARCHAR(10) DEFAULT 'NO',
         EAN_code VARCHAR(50),
+        pls JSON,
         product_data JSON,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE KEY unique_sku_pincode (sku, pincode)
@@ -169,11 +170,22 @@ def insert_product_data(product_dict: Dict):
 
     try:
         query = """
-        INSERT INTO pdp_data 
-        (sku, url, pincode, locality, city, product_name, brand, 
-         stock_availability_status, EAN_code, product_data)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
+    INSERT INTO pdp_data 
+    (
+        sku,
+        url,
+        pincode,
+        locality,
+        city,
+        product_name,
+        brand,
+        stock_availability_status,
+        EAN_code,
+        pls,
+        product_data
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
 
         cursor.execute(query, (
             product_dict.get('sku'),
@@ -183,8 +195,9 @@ def insert_product_data(product_dict: Dict):
             product_dict.get('city'),
             product_dict.get('product_name'),
             product_dict.get('brand'),
-            product_dict.get('stock_avaliblity_status'),
+            product_dict.get('stock_availability_status'),
             product_dict.get('EAN_code'),
+            json.dumps(product_dict.get('pls')),
             json.dumps(product_dict.get('product_data'))
         ))
         conn.commit()

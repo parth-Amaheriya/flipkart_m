@@ -1,9 +1,10 @@
 __pycache__
+check_response/
+main2/
 pagesaves/
 pagesaves2/
-
 pagesaves3/
-
 temp/
+*.json
+*.xls
 *.xlsx
-current_pagesaves/
