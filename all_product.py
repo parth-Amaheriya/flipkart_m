@@ -2,7 +2,8 @@ from datetime import datetime
 import pandas as pd
 import pymysql
 
-
+from datetime import datetime
+date= datetime.now().strftime("%Y_%m_%d")
 def adjust_time():
     """Adjust time for file naming convention."""
     now = datetime.now()
@@ -18,13 +19,14 @@ con = pymysql.connect(
    host="localhost",
         user="root",
         password="actowiz",
-        database="flipkart_minutes_final"
+        database="flipkart_minutes_test"
 )
 
 # create cursor, used to execute commands
 qr = f"""select id,
         pincode,
         city,
+        state,
         locality,
         sku,
         ean_code,
@@ -32,12 +34,16 @@ qr = f"""select id,
         product_name,
         brand,
         stock_avaliblity_status
-    from pdp_data"""
+    from pdp_data_{date} WHERE ean_code != 'N/A'
+LIMIT 300"""  # Adjust table name as needed
 df = pd.read_sql(qr, con)
 
 # Drop column by name
-# df.drop(columns=['id'], inplace=True)   # Replace 'column_name' with actual column name
+# Drop DB id
+df.drop(columns=['id'], inplace=True)
 
+# Add new serial id starting from 1
+df.insert(0, 'id', range(1, len(df) + 1))
 # Add new columns
 # df['platform'] = "Flipkart Minutes"
 df['Scrape_date'] = scrape_date
@@ -50,7 +56,7 @@ df.insert(9, 'platform', "Flipkart Minutes")
 # df.insert(0, 'id', range(1, 1 + len(df)))
 
 writer = pd.ExcelWriter(
-    rf"flipkart_minutes_{todayDateTime}.xlsx",
+    rf"flipkart_minutes_sample_{todayDateTime}.xlsx",
     engine='xlsxwriter',
     engine_kwargs={"options": {'strings_to_urls': False}}
 )

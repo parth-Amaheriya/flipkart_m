@@ -4,10 +4,13 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict
 from urllib.parse import urlparse, parse_qs
+from wsgiref import headers
 from curl_cffi import requests
 
 from utils import (
-    GEOCODE_DIR,
+    SUGGESTION_DIR,
+    LAT_LNG_DIR,
+    GEOCODE_DIR_2,
     UPDATE_DIR,
     RESPONSE1_DIR,
     RESPONSE2_DIR,
@@ -43,109 +46,212 @@ HEADERS =  {
     'sec-ch-ua-platform': '"Windows"',
     # 'Cookie': 'T=TI177933813735000087741217135396657343599418698600319723431969621358; at=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjFkOTYzYzUwLTM0YjctNDA1OC1iMTNmLWY2NDhiODFjYTBkYSJ9.eyJleHAiOjE3ODEwNjYxMzcsImlhdCI6MTc3OTMzODEzNywiaXNzIjoia2V2bGFyIiwianRpIjoiMTliOTIxNTEtNGVmOS00YzI2LWI2MTEtMGUxZTU4Mzg0YzVkIiwidHlwZSI6IkFUIiwiZElkIjoiVEkxNzc5MzM4MTM3MzUwMDAwODc3NDEyMTcxMzUzOTY2NTczNDM1OTk0MTg2OTg2MDAzMTk3MjM0MzE5Njk2MjEzNTgiLCJrZXZJZCI6IlZJNjE4Rjk3OEJGMDQ2NDcyMkE3NUMzOEZBNzY1MkUzODIiLCJ0SWQiOiJtYXBpIiwidnMiOiJMTyIsInoiOiJIWUQiLCJtIjp0cnVlLCJnZW4iOjN9.eMvBYdg5AcTMfFd4_t3UZkChgUcj-M6947MNhkiju6o; K-ACTION=null; vh=322; vw=1707; dpr=1.125; vd=VI618F978BF0464722A75C38FA7652E382-1779338138574-1.1779338138.1779338138.152368956; ud=8.H-ln8QiRdJI2Sd_6H6Ww6mCGs5k2lJvvabgQRdssG52XxQ245xgf3YrVa8ovhe7d4bDKJRuoob1zkpcAgyVelYixRfQpLgtdOzKp40ByzWT9ui1-6P9vX45J1J-o782Yf_IMFz8woDy2CmkeGaVkB2LLywXsLD7dcQ8LWnvn_mGHpC7iN4wVYLpgtnuRgbhCm5it_yRHpeCXcPhfBYYhB74967tN7qutMkqtC12hxxSv6gvWO1Q--3hLeTdzeGNeT2BTxyyFUbVEfFiEUgLIMiAjU0Of8gIDMItk3zddcVW5KRb-prbVIVJqDH53hnNuz-cI4_4CD_8VAWdRUFN1g8ksG-qN5Z74n016OfSYcZ3-6m35IRnJOduMdRY2OKw0ejF6Ju512K9it-YeSl7HCPJhEp-tSEd3PNTWsAhrXmjS0eKPcl5Z0ptdcD5qwfT23nkAwDgxm7QSRTe128ZXfAFacNu8bXV1LGdNGsh_i_BHFMn5jeNPZBXCdftfYWQ3M_rBFgh6hfrv8NinW0Aj_Q; S=d1t19WEE/IAM/Ij8/GCZYRj9WP+IgEcv2WQhsaf6re4n8ontP9lE4YOiQkw7kPHa7QxaB1bnONgf/PB6AG6jVf8TWTA==; SN=VI618F978BF0464722A75C38FA7652E382.TOK72F03336D0C64DE6A36E2967EC8BB110.1779338160229.LO',
 }
+api_key = "AIzaSyAtKsoYaqKOXMV00f9qLDAgbYYevlxAGsQ"
 
 # ======================= HELPER FUNCTIONS =======================
 import gzip
-
-
 def extract_location_data(data):
-    if not data or data.get("status") != "OK" or not data.get("results"):
-        return None, "No results or API error"
+    """
+    Parse location data from Google Places API v1 response.
+    """
+    if not data:
+        return None, "No data received"
 
-    result = data["results"][0]   # Best match
-
-    loc = result["geometry"]["location"]
-    address_components = result["address_components"]
-
-    latitude = loc["lat"]
-    longitude = loc["lng"]
-
-    city = None
-    locality = result.get("formatted_address")
-    state = None
-    pincode_extracted = None
-
-    for component in address_components:
-        types = component["types"]
-        
-        if "locality" in types and not city:                    # City / Town
-            city = component["long_name"]
-        
-        elif "administrative_area_level_1" in types:            # State
-            state = component["long_name"]
-        
-        elif "postal_code" in types:                            # Pincode
-            pincode_extracted = component["long_name"]
-
-    # Fallbacks
-    if not city:
-        # Try administrative_area_level_2 or sublocality as city
-        for component in address_components:
-            if "administrative_area_level_2" in component["types"]:
-                city = component["long_name"]
-                break
-    print("locality",locality)
-    return {
-        "latitude": latitude,
-        "longitude": longitude,
-        "city": city,
-        "locality": locality,
-        "state": state,
-        "pincode": pincode_extracted
-    }, None
-
-def get_lat_long_from_pincode(pincode: str):
-    api_key = "AIzaSyAtKsoYaqKOXMV00f9qLDAgbYYevlxAGsQ"
-    params = {"address": f"{pincode}, IN", "key": api_key, "components": f"postal_code:{pincode}"}
-    data = None
-    error_message = None
+    if isinstance(data, dict) and ("error" in data):
+        error_msg = data.get("error", {}).get("message", "Unknown error")
+        return None, f"API Error: {error_msg}"
 
     try:
-        resp = requests.get("https://maps.googleapis.com/maps/api/geocode/json", params=params)
-        print(resp)
-        data = resp.json()
+        # Extract coordinates
+        loc = data.get("location", {})
+        latitude = loc.get("latitude")
+        longitude = loc.get("longitude")
 
-        if data.get("status") != "OK" or not data.get("results"):
-            return None
-        extracted_data, error = extract_location_data(data)
-        if error:
-            return {"error": error}
-        
-        # result = data["results"][0]
-        # loc = result["geometry"]["location"]
-        # locality=result.get("formatted_address")
-        # city=state=None
-        # for component in result.get("address_components", []):
-        #     if 'locality' in component['types']:
-        #         city=component['long_name']
+        if latitude is None or longitude is None:
+            return None, "Missing latitude/longitude"
 
-        #     if 'administrative_area_level_1' in component['types']:
-        #         state=component['long_name']
-        # if city is None and state is not None:
-        #     print(city,state)
-        #     return {'error':"City or state not found in geocode result"}
-        # loc_info={
-        #     "latitude": loc["lat"],
-        #     "longitude": loc["lng"],
-        #     "city": city,
-        #     "locality": locality,
-        #     "state": state,
-        #     "pincode": pincode
-        # }
-        return extracted_data
+        formatted_address = data.get("formattedAddress")
+        address_components = data.get("addressComponents", [])
+
+        city = None
+        state = None
+        pincode_extracted = None
+
+        for component in address_components:
+            types = component.get("types", [])
+            long_name = component.get("longText")
+
+            if not long_name:
+                continue
+
+            # City / Town
+            if "locality" in types and not city:
+                city = long_name
+
+            # State
+            elif "administrative_area_level_1" in types:
+                state = long_name
+
+            # Pincode
+            elif "postal_code" in types:
+                pincode_extracted = long_name
+
+        # Fallbacks for city
+        if not city:
+            for component in address_components:
+                types = component.get("types", [])
+                long_name = component.get("longText")
+                
+                if any(t in types for t in ["administrative_area_level_2", "sublocality_level_1", "sublocality"]):
+                    city = long_name
+                    break
+        result={
+            "latitude": latitude,
+            "longitude": longitude,
+            "city": city,
+            "locality": formatted_address,
+            "state": state,
+            "pincode": pincode_extracted
+        }
+        print(f"Extracted Location Data: {result}")
+        return result, None
+
+    except Exception as e:
+        return None, f"Error parsing location data: {str(e)}"
     
+
+def get_state_city(lat, lng,pincode):
+    try:
+        reverse_params = {
+            "latlng": f"{lat},{lng}",
+            "key": api_key
+        }
+
+        reverse_resp = requests.get(
+            "https://maps.googleapis.com/maps/api/geocode/json",
+            params=reverse_params
+        )
+
+        reverse_data = reverse_resp.json()
+        formatted_address = reverse_data.get("plus_code",{}).get("compound_code")
+        
+        for result in reverse_data.get("results", []):
+
+            for comp in result.get("address_components", []):
+
+                types = comp.get("types", [])
+
+                # State
+                if "administrative_area_level_1" in types and not state:
+                    state = comp.get("long_name")
+
+                # City
+                if "locality" in types and not city:
+                    city = comp.get("long_name")
+
+                # Backup city
+                if (
+                    "administrative_area_level_2" in types
+                    and not city
+                ):
+                    city = comp.get("long_name")
+
+        return state, city,formatted_address  
+              
     except Exception as e:
         error_message = str(e)
         print(f"Geocode Error for {pincode}: {e}")
         return None
     finally:
         save_json(
-            data if data is not None else {"pincode": pincode, "error": error_message, "source": "geocode"},
-            GEOCODE_DIR,
+            reverse_data if reverse_data is not None else {"pincode": pincode, "error": error_message, "source": "geocode"},
+            GEOCODE_DIR_2,
             f"geocode_{pincode}.json"
+        ) 
+
+def get_lat_long(place_id):
+    error_message = None
+    try:
+        headers = {
+            'X-Goog-Api-Key': 'AIzaSyAtKsoYaqKOXMV00f9qLDAgbYYevlxAGsQ',
+            'X-Goog-FieldMask': 'id,types,addressComponents,formattedAddress,location,viewport,plusCode',
+        }
+
+        response = requests.get(f'https://places.googleapis.com/v1/places/{place_id}', headers=headers)
+        response=response.json()
+        return response
+
+    except Exception as e:
+        print(f"Error fetching place details for {place_id}: {e}")
+        error_message = str(e)
+        return {'error': str(e)}
+    
+    finally:
+        save_json(
+            response if response else { "error": error_message, "source": "get_lat_long", "place_id": place_id},
+            LAT_LNG_DIR,
+            f"get_lat_long_{place_id}.json"
+        ) 
+
+
+
+def get_suggestions(pincode: str):
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': 'AIzaSyAtKsoYaqKOXMV00f9qLDAgbYYevlxAGsQ',
+    }
+
+    json_data = {
+        'input': pincode,
+        'includedRegionCodes': [
+            'in',
+        ],
+    }
+    try:
+        resp = requests.post('https://places.googleapis.com/v1/places:autocomplete', headers=headers, json=json_data)
+        print(resp)
+        data = resp.json()
+        return data
+    except Exception as e:
+        print(f"Error fetching suggestions: {e}")
+        return {'error': str(e)}
+    finally:
+        save_json(
+            data if data is not None else {"pincode": pincode, "error": str(e), "source": "get_suggestions"},
+            SUGGESTION_DIR,
+            f"suggestion_{pincode}.json"
         )
+    
+def get_lat_long_from_pincode(pincode: str):
+    try:
+        suggesion_res = get_suggestions(pincode)
 
+        if suggesion_res and len(suggesion_res.get("suggestions", [])) == 0:
+            return None
+        
+        if len(suggesion_res.get("suggestions", [])) > 1:
+            suggestion = suggesion_res.get("suggestions", [])[1]
+        else:
+            suggestion = suggesion_res.get("suggestions", [])[0]
 
+        place_id=suggestion.get('placePrediction',{}).get('placeId')
+        get_lat_long_resp=get_lat_long(place_id)
+        extracted_data, error = extract_location_data(get_lat_long_resp)
+
+        if extracted_data['state'] is None or extracted_data['city'] is None:
+            state, city, formatted_address = get_state_city(extracted_data['latitude'], extracted_data['longitude'], pincode)
+            extracted_data['state'] = state
+            extracted_data['city'] = city
+            extracted_data['formatted_address'] = formatted_address
+
+        if error:
+            return {"error": error}
+        return extracted_data
+    
+    except Exception as e:
+        print(f"Geocode Error for {pincode}: {e}")
+        return {"error": str(e)}
+    
 def check_serviceability(latitude, longitude, pincode: str) -> bool:
     data = None
     error_message = None
@@ -180,8 +286,8 @@ def get_update_ud(data):
     geolocation = {'latitude': data['latitude'], 'longitude': data['longitude']}
     addressinfo = {
         'addressLine1': data.get('locality') or data.get('location', ''),
-        'city': data.get('city', ''),
-        'state': data.get('state', 'Gujarat'),
+        # 'city': data.get('city', ''),
+        # 'state': data.get('state'),
         'pincode': data['pincode']
     }
 
@@ -281,7 +387,7 @@ def process_pincode_for_deliverability(record: Dict):
             print(f"❌ Insert Error for {pincode}: {e}")
             db_handler.update_status_pincode('pincodes', record_id, "failed")
     else:
-        print(f"❌ Not serviceable: {pincode}")
+        print(f"⚠️ Not serviceable: {pincode}")
         db_handler.update_status_pincode('pincodes', record_id, "not_serviceable")
 
 
@@ -354,7 +460,7 @@ def fetch_product_details(pageuri: str, pincode: str, ud: str) -> Dict:
         else:
             availability = pls.get('availabilityStatus')
 
-        stock_status = "YES" if availability == 'IN_STOCK' else "NO"
+        stock_status = "Yes" if availability == 'IN_STOCK' else "No"
         product_name= f"{schema.get('name')} {parse_data.get('specifications', {}).get('Net Quantity')}"
 
         return {
@@ -369,7 +475,7 @@ def fetch_product_details(pageuri: str, pincode: str, ud: str) -> Dict:
     except Exception as e:
         error_message = str(e)
         print(f"Product Fetch Error for pin {pincode}: {e}")
-        return {}
+        return {'error': error_message}
     
     finally:
         # === Safe save in finally ===
@@ -427,7 +533,7 @@ def process_record(record: Dict):
             "product_name": prod_data.get('product_name'),
             "brand": prod_data.get('brand'),
             "stock_avaliblity_status": prod_data.get('stock_avaliblity_status'),
-            "EAN_code": record.get('EAN_Code'),  # from products_urls table
+            "EAN_code": record.get('ean_code'),
             "product_data": prod_data.get('product_data'),
             "pls":prod_data.get("pls")
         }
@@ -439,8 +545,7 @@ def process_record(record: Dict):
             db_handler.update_status("master_product_pincode", record_id, "failed")
             return
         db_handler.update_status("master_product_pincode", record_id, "done")
-        # db_handler.insert_product_data(result)
-        # print(f"✅Saved to DB: {p_url} | Pin: {pincode}")
+        print(f"✅Saved to DB: {p_url} | Pin: {pincode}")
 
     except Exception as e:
         print(f"❌Error processing {pincode}:{p_url}: {e}")
@@ -448,45 +553,107 @@ def process_record(record: Dict):
 
 
 # ======================= MAIN =======================
+# def main():
+#     db_handler.create_tables()
+
+#     print("=== Step 1: Checking Pincode Deliverability ===")
+#     while True:
+#         unique_pincode_rows = db_handler.get_unique_pending_pincodes()
+#         if not unique_pincode_rows:
+#             print("No new pincodes to check.")
+#             break
+
+#         print(f"Found {len(unique_pincode_rows)} unique pincodes to check.")
+#         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+#             futures = [executor.submit(process_pincode_for_deliverability, record) for record in unique_pincode_rows]
+#             for future in as_completed(futures):
+#                 future.result()
+
+#     print("\n=== Step 2: Creating Master Table ===\n")
+#     db_handler.create_master_table()
+
+#     print("\n=== Step 3: Starting Product Scraping (Only Deliverable Pincodes) ===\n")
+
+#     while True:
+#         pending = db_handler.get_deliverable_pincodes()
+#         if not pending:
+#             print("No more pending records. Finished!")
+#             break
+
+#         print(f"Processing {len(pending)} records with {MAX_WORKERS} threads...\n")
+
+#         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+#             futures = [executor.submit(process_record, rec) for rec in pending]
+#             for future in as_completed(futures):
+#                 try:
+#                     future.result()
+#                 except Exception as e:
+#                     print(f"Thread Error: {e}")
+
+#         time.sleep(2)
+
+# ======================= MAIN PRODUCT SCRAPING =======================
 def main():
+    LINK_LIMIT=50
     db_handler.create_tables()
 
-    print("=== Step 1: Checking Pincode Deliverability ===")
+    print("=== Step 1: Pincode Deliverability Check ===")
     while True:
         unique_pincode_rows = db_handler.get_unique_pending_pincodes()
         if not unique_pincode_rows:
-            print("No new pincodes to check.")
+            print("No more pincodes to check.")
             break
 
-        print(f"Found {len(unique_pincode_rows)} unique pincodes to check.")
+        print(f"Found {len(unique_pincode_rows)} pincodes.")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = [executor.submit(process_pincode_for_deliverability, record) for record in unique_pincode_rows]
             for future in as_completed(futures):
                 future.result()
 
-    # print("\n=== Step 2: Creating Master Table ===\n")
-    # db_handler.create_master_table()
+    print("\n=== Step 2: Creating Master Table ===")
+    db_handler.create_master_table()
 
-    print("\n=== Step 3: Starting Product Scraping (Only Deliverable Pincodes) ===\n")
+    print("\n=== Step 3: Product Scraping (Per Product + City) ===\n")
 
-    while True:
-        pending = db_handler.get_deliverable_pincodes()
-        if not pending:
-            print("No more pending records. Finished!")
-            break
+    conn = db_handler.get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    cursor.execute("""
+        SELECT DISTINCT product_title, city 
+        FROM products_urls 
+        ORDER BY product_title, city
+    """)
+    product_city_combos = cursor.fetchall()
+    cursor.close()
+    conn.close()
 
-        print(f"Processing {len(pending)} records with {MAX_WORKERS} threads...\n")
+    for combo in product_city_combos:
+        product_title = combo['product_title']
+        city = combo['city']
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = [executor.submit(process_record, rec) for rec in pending]
-            for future in as_completed(futures):
-                try:
-                    future.result()
-                except Exception as e:
-                    print(f"Thread Error: {e}")
+        print(f"\n🚀 Processing Product: {product_title} | City: {city}")
 
-        time.sleep(2)
+        while True:
+            pending = db_handler.get_deliverable_pincodes_for_product(product_title, city, limit=LINK_LIMIT)
+            if not pending:
+                print(f"   ✅ Completed: {product_title} in {city}")
+                break
 
+            print(f"   Processing {len(pending)} records...")
+
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = [executor.submit(process_record, rec) for rec in pending]
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Thread Error: {e}")
+
+            time.sleep(2)
+
+    print("\n🎉 All products processed!")
 
 if __name__ == "__main__":
     main()
+
+
+

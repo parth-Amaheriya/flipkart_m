@@ -3,8 +3,14 @@ check_response/
 main2/
 pagesaves/
 pagesaves_2026_05_26/
+pagesaves_2026_05_28/
+
+ex/
 pagesaves3/
 temp/
 *.json
 *.xls
 *.xlsx
+
+*.zip
+

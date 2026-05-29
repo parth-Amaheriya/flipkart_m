@@ -7,7 +7,7 @@ DB_CONFIG = {
     "host": "localhost",
     "user": "root",
     "password": "actowiz",
-    "database": "flipkart_minutes_final2"
+    "database": "flipkart_minutes_test"
 }
 
 LINK_LIMIT = 50
@@ -74,27 +74,8 @@ def create_master_table():
         print("master_product_pincode table already exists.")
         return
 
-    # cursor.execute(f"""
-    # CREATE TABLE master_product_pincode_{date} (
-    #     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    #     ean_code VARCHAR(50),
-    #     product_url TEXT,
-
-    #     pincode INT,
-    #     ud varchar(5000),
-    #     latitude DECIMAL(10,6),
-    #     longitude DECIMAL(10,6),
-    #     city VARCHAR(100),
-    #     state VARCHAR(100),
-    #     locality VARCHAR(255),
-    #     location VARCHAR(100),
-
-    #     status VARCHAR(20) DEFAULT 'pending',
-
-    #     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    # );
-    # """)
-    cursor.execute(f"""CREATE TABLE master_product_pincode_{date} (
+    cursor.execute(f"""
+    CREATE TABLE master_product_pincode_{date} (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
 
     ean_code VARCHAR(50),
@@ -133,7 +114,14 @@ INSERT INTO master_product_pincode_{date} (
     status
 )
 SELECT DISTINCT
-    NULLIF(TRIM(p.ean_code), ''),
+    CASE
+        WHEN p.ean_code IS NULL
+             OR TRIM(p.ean_code) = ''
+             OR LOWER(TRIM(p.ean_code)) = 'nan'
+        THEN 'N/A'
+        ELSE TRIM(p.ean_code)
+    END AS ean_code,
+    
     p.url,
     pc.pincode,
     pc.ud,
@@ -147,6 +135,7 @@ SELECT DISTINCT
 FROM products_urls p
 CROSS JOIN final_pincode_deliverable_{date} pc;
 """)
+
     conn.commit()
     cursor.close()
     conn.close()
@@ -213,17 +202,47 @@ def insert_deliverable_pincode(pincode: str, ud: str, lat: float, lng: float, ci
         conn.close()
 
 
-def get_deliverable_pincodes(limit: int = LINK_LIMIT) -> List[Dict]:
-    """Get deliverable pincodes for product scraping"""
+# def get_deliverable_pincodes(limit: int = LINK_LIMIT) -> List[Dict]:
+#     """Get deliverable pincodes for product scraping"""
+#     conn = get_db_connection()
+#     cursor = conn.cursor(dictionary=True)
+
+#     cursor.execute(f"""
+#         SELECT *
+#         FROM master_product_pincode_{date}
+#         WHERE status = 'pending'
+#         LIMIT %s
+#     """, (limit,))
+
+#     rows = cursor.fetchall()
+
+#     if rows:
+#         ids = [row['id'] for row in rows]
+#         placeholders = ','.join(['%s'] * len(ids))
+#         cursor.execute(f"""
+#             UPDATE master_product_pincode_{date}
+#             SET status = 'processing'
+#             WHERE id IN ({placeholders})
+#         """, ids)
+#         conn.commit()
+
+#     cursor.close()
+#     conn.close()
+#     return rows
+def get_deliverable_pincodes_for_product(product_title: str, city: str, limit: int = LINK_LIMIT) -> List[Dict]:
+    """Get deliverable pincodes for a specific product + city combination"""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     cursor.execute(f"""
-        SELECT *
-        FROM master_product_pincode_{date}
-        WHERE status = 'pending'
+        SELECT m.*
+        FROM master_product_pincode_{date} m
+        JOIN products_urls p ON m.product_url = p.url
+        WHERE m.status = 'pending'
+          AND p.product_title = %s
+          AND p.city = %s
         LIMIT %s
-    """, (limit,))
+    """, (product_title, city, limit))
 
     rows = cursor.fetchall()
 
